@@ -1,0 +1,806 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pitch Ball</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #0b2617; }
+  body { font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #f2f7f2; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; }
+  [hidden] { display: none !important; }
+  .hud { position: fixed; pointer-events: none; text-shadow: 0 1px 4px #000c; left: 0; right: 0; text-align: center; }
+  #score { top: max(8px, env(safe-area-inset-top)); display: flex; justify-content: center; align-items: center; gap: 8px; }
+  #score .t { min-width: 46px; padding: 1px 10px; border-radius: 10px; font: 900 24px/1.25 system-ui, sans-serif; font-variant-numeric: tabular-nums; color: #fff; }
+  #score .t0 { background: #e2414c; } #score .t1 { background: #2f86e6; }
+  #score .t.me { box-shadow: 0 0 0 3px #ffffffcc; }
+  #clock { min-width: 62px; padding: 3px 10px; border-radius: 10px; background: #00000070; font: 800 17px/1.3 system-ui, sans-serif; font-variant-numeric: tabular-nums; }
+  #clock.gold { color: #ffd166; }
+  #hint { top: calc(max(8px, env(safe-area-inset-top)) + 42px); font-size: 14px; opacity: .9; transition: opacity 1s; }
+  #msg { top: 42%; transform: translateY(-50%); font: 900 min(15vw, 80px)/1 system-ui, sans-serif; letter-spacing: .03em; opacity: 0; transition: opacity .25s, transform .25s; }
+  #msg small { display: block; margin-top: 8px; font-size: 18px; font-weight: 700; letter-spacing: 0; }
+  #msg.on { opacity: 1; transform: translateY(-50%) scale(1.06); }
+  #net { bottom: max(6px, env(safe-area-inset-bottom)); font-size: 12px; opacity: .75; }
+  #kick { position: fixed; right: max(18px, env(safe-area-inset-right)); bottom: calc(max(18px, env(safe-area-inset-bottom)) + 18px); width: 92px; height: 92px; border-radius: 50%;
+          border: 3px solid #ffffff99; background: #ffffff26; color: #fff; font: 900 17px system-ui, sans-serif; touch-action: none; }
+  #kick.on { background: #ffffff77; color: #0b2617; }
+  #over { position: fixed; inset: 0; display: grid; place-items: center; background: #06150cb0; }
+  .card { box-sizing: border-box; width: min(380px, calc(100vw - 32px)); max-height: 86vh; overflow: auto; padding: 22px; border-radius: 16px; background: #123222; border: 1px solid #ffffff22; text-align: center; }
+  .card h2 { margin: 0 0 4px; font-size: 27px; }
+  .card h3 { margin: 14px 0 4px; font-size: 14px; color: #ffd166; text-align: left; }
+  .card ol { text-align: left; margin: 0; padding-left: 26px; font-size: 14px; min-height: 22px; }
+  .card li span { float: right; font-variant-numeric: tabular-nums; } .card li.me { color: #ffd166; font-weight: 700; }
+  .card p { margin: 8px 0 0; font-size: 13px; opacity: .8; }
+  #final { font: 800 20px system-ui, sans-serif; }
+  button.go { width: 100%; min-height: 48px; margin-top: 14px; border: 0; border-radius: 12px; background: #7be08a; color: #08200f; font: 800 17px system-ui, sans-serif; cursor: pointer; }
+</style>
+<script src="https://cdn.multiplayeragent.com/sdk/mp.global.js"></script>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div class="hud" id="score"><span class="t t0" id="s0">0</span><span id="clock">3:00</span><span class="t t1" id="s1">0</span></div>
+<div class="hud" id="hint"></div>
+<div class="hud" id="msg"></div>
+<div class="hud" id="net">Connecting…</div>
+<button id="kick" hidden>KICK</button>
+<div id="over" hidden><div class="card">
+  <h2 id="winner"></h2><div id="final"></div>
+  <h3>Scorers this match</h3><ol id="scorers"></ol>
+  <h3>Most goals</h3><ol id="board"><li>Loading…</li></ol>
+  <button class="go" id="again">Play again</button><p id="next"></p>
+</div></div>
+<script>
+/* ═══ PITCH BALL · a Multiplayer Agent starter ═════════════════════════════════════════
+ * Top-down team football with round players: run, hold Kick, score in the far goal.
+ * Versus, 2–8 players on two teams; bots fill every empty spot, so it's always at least 3 v 3.
+ *
+ * WHERE THINGS ARE (search for the "── " headers):
+ *   CONFIG ........ team size, the clock, pitch size, running, kicking, ball physics, the bots
+ *   CONNECTION .... MP_CONNECT, joining, the offline room, who is host
+ *   PITCH ......... sizes, posts, kickoff spots, keeping players on the pitch
+ *   PHYSICS ....... the ball: lines, posts, nets, bumps and kicks (the host and everyone's prediction use it)
+ *   MATCH (HOST) .. teams, score, kickoffs, the clock, the winner. Only the host writes these.
+ *   BOTS .......... the bot brain: one chases and shoots, the keeper guards, the rest hold their shape
+ *   ME ............ running, kicking, my own touches on the ball
+ *   DRAW .......... the pitch seen from YOUR side (you always attack right, or up on a phone)
+ *   HUD & RESULTS . scoreboard, clock, messages, results card, leaderboard
+ *   INPUT ......... keyboard, mouse, and a thumb stick + Kick button on touch
+ *
+ * HOW THE MULTIPLAYER WORKS (a relay room: no server code):
+ *   - Each player writes its OWN entity: `p` {x, y, vx, vy, k} (its disc in pitch units, k = kick
+ *     held) about 15 times a second, `hb` (heartbeat) once a second, `rdy` (Play again), `n`/`c` once.
+ *   - The HOST is the lowest sessionId among live players (heartbeat seen in the last 3s), worked
+ *     out every frame. Only the host writes the shared fields:
+ *       `game` {id, v, phase, teams, score, ko, kickAt, resumeAt, endsAt, golden, win, overAt, goals, last}:
+ *              who plays on which team (sessionIds, or bot ids "b1".."b9"), the score, the clock.
+ *              `v` goes up on every write; `ko` counts kickoffs (everyone walks back to their spot).
+ *       `ball` {x, y, vx, vy, h, s, z, lt, b}: the ball ~15 times a second (h = touches so far,
+ *              s = write number, z = 1 while it waits for kickoff, lt = last toucher, b = the bots).
+ *   - The host moves the ball against the lines, the posts, its own disc and the bots. Everyone
+ *     else runs the ball on their own screen between writes and decides THEIR OWN touches: when
+ *     your disc bumps or kicks the ball on your screen, it moves at once and you send "hit"
+ *     {x, y, vx, vy, g, ko, kick}; the host checks it is plausible and adopts it. A ball that
+ *     crosses a goal line on the host's screen waits `goalGrace` ms for a save before it counts.
+ *   - Someone who joins takes a bot's spot on the team with fewer people, mid-match; someone who
+ *     leaves is replaced by a bot. A new host adopts `game` and `ball` and carries on.
+ *   - ?attract plays offline, bots against bots (the preview video is recorded from it).
+ *   - Leaderboard "goals": every goal you score adds 1 to your total.
+ */
+
+// ── CONFIG ──────────────────────────────────────────────────────────────────────────
+const CONFIG = {
+  teamSize: 3,          // players per team; bots fill the spots people don't
+  maxTeam: 4,           // the most per team (8 in all); teams grow past teamSize when more people join
+  goalsToWin: 5,        // first to this many goals wins...
+  matchMs: 180000,      // ...or whoever leads when the clock runs out (a tie goes to golden goal)
+  fieldL: 1200, fieldW: 640, // pitch size in pitch units; the goals are at the two short ends
+  goalW: 220, goalDepth: 46, // goal mouth width and how deep the net is
+  playerR: 24, ballR: 14, postR: 7,
+  runOff: 30,           // how far past the side and end lines players may run
+  runSpeed: 330,        // top running speed, units/s
+  runAccel: 7,          // how quickly you reach top speed (higher = snappier)
+  kickSlow: 0.78,       // share of top speed while you hold Kick
+  kickPower: 640,       // speed a kick gives the ball, units/s
+  kickReach: 9,         // how close the ball must be to kick it (gap between the edges)
+  ballFriction: 0.7,    // how fast the ball slows (share of its speed lost per second, roughly)
+  maxBall: 1150,        // fastest the ball can go, units/s
+  wallBounce: 0.55,     // how much speed a bounce off a line or a post keeps
+  touchBounce: 0.45,    // how much a bump (running into the ball, no kick) springs it away
+  botSpeed: 0.88,       // bots run at this share of top speed
+  botError: 70,         // how far off bots aim and stand, units
+  botThink: 170,        // ms between bot decisions
+  botShoot: 560,        // bots shoot when the ball is this close to the goal (further out they dribble)
+  botLongShot: 0.25,    // chance a bot far from goal boots the ball instead of dribbling
+  keeperFollow: 0.55,   // how far a bot keeper slides across its goal with the ball (1 = all the way)
+  goalMs: 2400,         // ms of celebration after a goal
+  kickoffMs: 1300,      // ms everyone waits on their spot before a kickoff
+  resultsMs: 9000,      // ms on the results card before the next match
+  sendMs: 66,           // my disc and the ball (~15 a second)
+  goalGrace: 200,       // ms someone else has to save a ball that crossed the line on the host's screen
+  board: "goals",
+};
+const TEAM_COLORS = ["#e2414c", "#2f86e6"], TEAM_DARK = ["#7c1820", "#123f7a"], TEAM_NAMES = ["Red", "Blue"];
+const COLORS = ["#ffd166", "#ffffff", "#7cf2c9", "#c7a2ff", "#ff9f43", "#ff8fd0", "#a6f26b", "#7fe3ff"]; // each person's own color (the middle of their disc)
+const BOT_NAMES = ["", "Bolt", "Nutmeg", "Rocket", "Wall", "Dribbles", "Volley", "Zippy", "Header", "Lobby"]; // bot "b3" is Rocket
+
+// ── CONNECTION ──────────────────────────────────────────────────────────────────────
+// The builder fills these in for this game. Downloaded from GitHub? Put your own pk_ key here.
+const MP_CONNECT = {
+  key: 'pk_REPLACE_ME',
+  room: 'pitch-ball',
+  endpoint: 'wss://live.multiplayeragent.com',
+  apiUrl: 'https://api.multiplayeragent.com',
+};
+const ATTRACT = new URLSearchParams(location.search).has("attract");
+
+/** Same shape as the SDK client, kept in this tab: offline play and ?attract. */
+function localRoom() {
+  const id = "local", state = { entities: { players: { [id]: {} } }, shared: {} }, subs = [];
+  let queued = false;
+  const emit = () => { if (!queued) { queued = true; queueMicrotask(() => { queued = false; subs.forEach((f) => f(state)); }); } };
+  const put = (o, k, v) => { if (typeof k === "object") Object.assign(o, k); else o[k] = v; emit(); };
+  return {
+    sessionId: id, state, offline: true,
+    me: { set: (k, v) => put(state.entities.players[id], k, v) },
+    setShared: (k, v) => put(state.shared, k, v),
+    onState: (f) => { subs.push(f); f(state); }, onJoin() {}, onLeave() {}, on() {}, send() {},
+    onDisconnect() {}, onReconnect() {}, leave: async () => {},
+  };
+}
+async function connect() {
+  if (ATTRACT || typeof MP === "undefined") return localRoom();
+  try {
+    const mp = await Promise.race([MP.join({ ...MP_CONNECT }), new Promise((_, no) => setTimeout(() => no(new Error("timed out")), 10000))]);
+    window.mp = mp; // the builder calls window.mp.leave() when the page closes
+    return mp;
+  } catch (e) {
+    console.warn("Playing offline:", e && e.message);
+    return localRoom();
+  }
+}
+const parse = (v, fb) => { if (typeof v !== "string") return fb; try { return JSON.parse(v); } catch { return fb; } };
+const memo = new Map();
+/** A JSON field, parsed once per change (read-only: never mutate what this returns). */
+function cached(key, raw, fb) { const m = memo.get(key); if (m && m.raw === raw) return m.v; const v = parse(raw, fb); memo.set(key, { raw, v }); return v; }
+let net = null, S = { entities: { players: {} }, shared: {} };
+const seenHb = new Map();
+/** Players whose heartbeat moved in the last 3s (plus us), sorted by sessionId. */
+function livePlayers() {
+  const now = performance.now(), out = [];
+  for (const [id, p] of Object.entries(S.entities.players || {})) {
+    const s = seenHb.get(id);
+    if (!s || s.hb !== p.hb) seenHb.set(id, { hb: p.hb, at: now });
+    if (id === net.sessionId || now - seenHb.get(id).at < 3000) out.push(id);
+  }
+  return out.sort();
+}
+const isHost = () => livePlayers()[0] === net.sessionId;
+const humans = () => livePlayers().filter((id) => !(ATTRACT && id === net.sessionId)); // in the preview you only watch
+
+// ── PITCH ───────────────────────────────────────────────────────────────────────────
+// Pitch units: x runs -HL..HL along the pitch, y runs -HW..HW across. Red (team 0) defends the -x goal
+// and attacks +x; Blue (team 1) the other way round.
+const HL = CONFIG.fieldL / 2, HW = CONFIG.fieldW / 2, GW = CONFIG.goalW / 2, GD = CONFIG.goalDepth;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const POSTS = [[HL, GW], [HL, -GW], [-HL, GW], [-HL, -GW]].map(([x, y]) => ({ x, y }));
+// Kickoff spots for a team of 1–4, as shares of half the pitch, seen from Red's side.
+const SPOTS = { 1: [[-0.3, 0]], 2: [[-0.72, 0], [-0.25, 0]], 3: [[-0.84, 0], [-0.36, -0.42], [-0.36, 0.42]], 4: [[-0.86, 0], [-0.5, -0.45], [-0.5, 0.45], [-0.17, 0]] };
+/** Where player `i` of `team` (of `size`) stands at kickoff. Blue's spots are Red's turned round. */
+function spotOf(team, i, size) {
+  const s = (SPOTS[size] || SPOTS[4])[i] || [-0.5, 0], f = team === 0 ? 1 : -1;
+  return { x: s[0] * HL * f, y: s[1] * HW * f };
+}
+/** Push disc `d` out of a circle at `p` (min = the distance they must keep), by `share` of the overlap. */
+function pushOut(d, p, min, share) {
+  const dx = d.x - p.x, dy = d.y - p.y, dist = Math.hypot(dx, dy);
+  if (dist >= min || dist < 0.001) return false;
+  const nx = dx / dist, ny = dy / dist, rel = d.vx * nx + d.vy * ny;
+  d.x += nx * (min - dist) * share; d.y += ny * (min - dist) * share;
+  if (rel < 0) { d.vx -= rel * nx; d.vy -= rel * ny; }
+  return true;
+}
+/** Keep a disc on the pitch (a little past the lines is fine, but never inside a goal) and off the posts. */
+function keepOnPitch(d) {
+  const R = CONFIG.playerR, out = CONFIG.runOff;
+  if (Math.abs(d.x) > HL + out) { d.x = Math.sign(d.x) * (HL + out); d.vx = 0; }
+  if (Math.abs(d.y) > HW + out) { d.y = Math.sign(d.y) * (HW + out); d.vy = 0; }
+  if (Math.abs(d.x) > HL && Math.abs(d.y) < GW + R) { // behind a goal line, level with the goal: step out the short way
+    const inX = Math.abs(d.x) - HL, inY = GW + R - Math.abs(d.y);
+    if (inX < inY) { d.x = Math.sign(d.x) * HL; d.vx = 0; } else { d.y = (Math.sign(d.y) || 1) * (GW + R); d.vy = 0; }
+  }
+  for (const p of POSTS) pushOut(d, p, R + CONFIG.postR, 1);
+}
+/** Run a disc toward input (ix, iy) (pitch directions, length up to 1) at `speedShare` of top speed. */
+function runDisc(d, ix, iy, dt, speedShare) {
+  const top = CONFIG.runSpeed * speedShare * (d.k ? CONFIG.kickSlow : 1), a = 1 - Math.exp(-CONFIG.runAccel * dt);
+  d.vx += (ix * top - d.vx) * a; d.vy += (iy * top - d.vy) * a;
+  d.x += d.vx * dt; d.y += d.vy * dt;
+}
+
+// ── PHYSICS ─────────────────────────────────────────────────────────────────────────
+/** Move the ball dt seconds against the lines, posts, nets and `discs` ({x, y, vx, vy}).
+ *  Returns { hit: the disc that bumped it or null, wall, post, goal: the team whose goal it is in, or -1 }. */
+function stepBall(b, dt, discs) {
+  const out = { hit: null, wall: false, post: false, goal: -1 }, r = CONFIG.ballR, e = CONFIG.wallBounce;
+  const n = Math.max(1, Math.ceil((Math.hypot(b.vx, b.vy) * dt) / 8));
+  for (let i = 0; i < n; i++) {
+    b.x += (b.vx * dt) / n; b.y += (b.vy * dt) / n;
+    for (const q of discs) {
+      const dx = b.x - q.x, dy = b.y - q.y, d = Math.hypot(dx, dy), min = r + CONFIG.playerR;
+      if (d >= min || d < 0.001) continue;
+      const nx = dx / d, ny = dy / d, rel = (b.vx - q.vx) * nx + (b.vy - q.vy) * ny;
+      b.x = q.x + nx * min; b.y = q.y + ny * min;
+      if (rel < 0) { b.vx -= (1 + CONFIG.touchBounce) * rel * nx; b.vy -= (1 + CONFIG.touchBounce) * rel * ny; out.hit = q; }
+    }
+    for (const p of POSTS) {
+      const dx = b.x - p.x, dy = b.y - p.y, d = Math.hypot(dx, dy), min = r + CONFIG.postR;
+      if (d >= min || d < 0.001) continue;
+      const nx = dx / d, ny = dy / d, rel = b.vx * nx + b.vy * ny;
+      b.x = p.x + nx * min; b.y = p.y + ny * min;
+      if (rel < 0) { b.vx -= (1 + e) * rel * nx; b.vy -= (1 + e) * rel * ny; out.post = true; }
+    }
+    if (Math.abs(b.x) > HL) { // inside a net: its sides and its back
+      if (Math.abs(b.y) > GW - r) { b.y = Math.sign(b.y) * (GW - r); b.vy = -b.vy * 0.3; }
+      if (Math.abs(b.x) > HL + GD - r) { b.x = Math.sign(b.x) * (HL + GD - r); b.vx = -b.vx * 0.2; b.vy *= 0.6; }
+      if (Math.abs(b.x) > HL + r) out.goal = b.x > 0 ? 1 : 0;
+    } else {
+      if (Math.abs(b.y) > HW - r) { b.y = Math.sign(b.y) * (HW - r); b.vy = -b.vy * e; out.wall = true; }
+      if (Math.abs(b.y) >= GW && Math.abs(b.x) > HL - r) { b.x = Math.sign(b.x) * (HL - r); b.vx = -b.vx * e; out.wall = true; }
+    }
+  }
+  const sp = Math.hypot(b.vx, b.vy), cap = sp > CONFIG.maxBall ? CONFIG.maxBall / sp : 1, f = Math.exp(-CONFIG.ballFriction * dt) * cap;
+  b.vx *= f; b.vy *= f;
+  if (Math.abs(b.vx) + Math.abs(b.vy) < 4) b.vx = b.vy = 0;
+  return out;
+}
+/** Disc `d` kicks: if the ball is within reach it flies straight away from d's middle. Returns true if it did. */
+function kickBall(b, d) {
+  const dx = b.x - d.x, dy = b.y - d.y, dist = Math.hypot(dx, dy);
+  if (dist < 0.001 || dist - CONFIG.playerR - CONFIG.ballR > CONFIG.kickReach) return false;
+  const nx = dx / dist, ny = dy / dist, rel = b.vx * nx + b.vy * ny;
+  if (rel < 0) { b.vx -= rel * nx; b.vy -= rel * ny; } // cancel the part coming at you
+  b.vx += nx * CONFIG.kickPower + d.vx * 0.25; b.vy += ny * CONFIG.kickPower + d.vy * 0.25;
+  const sp = Math.hypot(b.vx, b.vy); if (sp > CONFIG.maxBall) { b.vx *= CONFIG.maxBall / sp; b.vy *= CONFIG.maxBall / sp; }
+  return true;
+}
+
+// ── MATCH (HOST) ────────────────────────────────────────────────────────────────────
+const host = { last: null, wasHost: false, bots: new Map(), lastBall: 0, lastBody: "", pending: null };
+let ball = { x: 0, y: 0, vx: 0, vy: 0, h: 0, s: 0, z: 1, lt: "" }; // the host's real ball; everyone else's prediction of it
+const isBot = (id) => /^b\d$/.test(id);
+const teamOf = (g, id) => (g.teams[0].includes(id) ? 0 : g.teams[1].includes(id) ? 1 : -1);
+/** The game as state has it, or the host's own newer write that hasn't come back yet. `v` only goes up. */
+function game() {
+  const g = cached("game", S.shared.game, null);
+  return host.last && isHost() && (!g || host.last.v > g.v) ? host.last : g;
+}
+function writeGame(g) { g = { ...g, v: (game()?.v ?? 0) + 1 }; host.last = g; net.setShared("game", JSON.stringify(g)); return g; }
+const teamSize = (people) => clamp(Math.ceil(people / 2), CONFIG.teamSize, CONFIG.maxTeam);
+/** Fill gaps (null) and both teams up to `size` with bots; drop spare bots. */
+function fillBots(teams, size) {
+  const used = new Set(teams.flat());
+  const newBot = () => { let k = 1; while (used.has("b" + k)) k++; used.add("b" + k); return "b" + k; };
+  return teams.map((t) => {
+    t = t.map((id) => id || newBot());
+    for (let i = t.length - 1; i >= 0 && t.length > size; i--) if (isBot(t[i])) t.splice(i, 1);
+    while (t.length < size) t.push(newBot());
+    return t;
+  });
+}
+/** Everyone still here keeps their spot; a newcomer takes a bot's spot on the team with fewer people. */
+function arrangeTeams(teams, people) {
+  const size = teamSize(people.length), t = teams.map((team) => team.map((id) => (isBot(id) || people.includes(id) ? id : null)));
+  const count = (k) => t[k].filter((id) => id && !isBot(id)).length;
+  for (const id of people) {
+    if (t[0].includes(id) || t[1].includes(id)) continue;
+    const k = count(0) !== count(1) ? (count(0) < count(1) ? 0 : 1) : t[0].length <= t[1].length ? 0 : 1;
+    if (count(k) >= size) continue; // every spot has a person in it: this one watches
+    let i = t[k].indexOf(null); if (i < 0) i = t[k].findIndex((x, j) => j > 0 && isBot(x)); if (i < 0) i = t[k].findIndex(isBot); // a bot keeps goal if it can
+    if (i < 0) t[k].push(id); else t[k][i] = id;
+  }
+  return fillBots(t, size);
+}
+/** A fresh match: the people here shuffled into two teams, bots in the gaps, 0–0. */
+function newGame(id) {
+  const people = humans().sort(() => Math.random() - 0.5), teams = [[], []], t = Date.now();
+  people.forEach((p, i) => teams[i % 2].push(p));
+  const filled = fillBots(teams, teamSize(people.length)).map((t) => { const b = t.findIndex(isBot); return b > 0 && !isBot(t[0]) ? [t[b], ...t.filter((_, j) => j !== b)] : t; }); // a bot keeps goal
+  const kickAt = t + CONFIG.kickoffMs + 800;
+  return { id, phase: "play", teams: filled, score: [0, 0], ko: 1, kickAt, resumeAt: 0,
+    endsAt: kickAt + CONFIG.matchMs, golden: 0, win: -1, overAt: 0, goals: {}, last: null };
+}
+/** Everyone back on their spot (bots here; people move themselves when they see `ko` change), ball on the spot. */
+function kickoffReset(g) {
+  for (const b of host.bots.values()) { const k = teamOf(g, b.id); if (k >= 0) Object.assign(b, spotOf(k, g.teams[k].indexOf(b.id), g.teams[k].length), { vx: 0, vy: 0 }); }
+  Object.assign(ball, { x: 0, y: 0, vx: 0, vy: 0, z: 1, lt: "" }); host.pending = null; writeBall();
+}
+function writeBall(onlyIfMoved) {
+  const r = Math.round, b = [...host.bots.values()].map((q) => [q.id, r(q.x), r(q.y), r(q.vx), r(q.vy), q.k ? 1 : 0]);
+  const body = JSON.stringify({ x: r(ball.x), y: r(ball.y), vx: r(ball.vx), vy: r(ball.vy), h: ball.h, z: ball.z, lt: ball.lt, b });
+  host.lastBall = performance.now();
+  if (onlyIfMoved && body === host.lastBody) return; // nothing moved: save the message
+  host.lastBody = body; ball.s++;
+  net.setShared("ball", body.slice(0, -1) + `,"s":${ball.s}}`);
+}
+/** Become host: take over the game, the ball and the bots exactly as state has them. */
+function adopt() {
+  host.wasHost = true; host.pending = null; host.bots.clear();
+  const s = parse(S.shared.ball, null);
+  if (s) { // our own screen has been running the ball on from this write: keep that (the write can be seconds old if the old host froze)
+    if (s.s !== pred.lastS) Object.assign(ball, { x: s.x, y: s.y, vx: s.vx, vy: s.vy, h: s.h, z: s.z, lt: s.lt || "" });
+    ball.s = s.s;
+    for (const [id, x, y, vx, vy] of s.b || []) host.bots.set(id, newBotDisc(id, x, y, vx, vy));
+  }
+}
+const newBotDisc = (id, x, y, vx = 0, vy = 0) => ({ id, x, y, vx, vy, k: 0, kickCd: 0, kickShow: 0, thinkAt: 0, ex: 0, ey: 0, aimY: 0, ux: 1, uy: 0, dribble: false });
+/** host.bots holds exactly the bots on the teams. */
+function syncBots(g) {
+  for (const id of g.teams.flat()) if (isBot(id) && !host.bots.has(id)) { const k = teamOf(g, id); const s = spotOf(k, g.teams[k].indexOf(id), g.teams[k].length); host.bots.set(id, newBotDisc(id, s.x, s.y)); }
+  for (const id of [...host.bots.keys()]) if (teamOf(g, id) < 0) host.bots.delete(id);
+}
+/** The clock ran out: the leader wins, a tie goes to golden goal. */
+function fullTime(g, t) {
+  if (g.score[0] === g.score[1]) return writeGame({ ...g, golden: 1 });
+  return writeGame({ ...g, phase: "over", win: g.score[0] > g.score[1] ? 0 : 1, overAt: t + CONFIG.resultsMs });
+}
+/** The ball is in `side`'s goal: a goal for the other team (or an own goal), maybe the winner. */
+function scoreGoal(g, side, t) {
+  const team = 1 - side, lt = ball.lt, own = !!lt && teamOf(g, lt) === side, score = [...g.score];
+  score[team]++;
+  const goals = { ...g.goals };
+  if (lt && !own) goals[lt] = [((goals[lt] || [])[0] || 0) + 1, nameOf(lt)];
+  const win = g.golden || score[team] >= CONFIG.goalsToWin ? team : -1;
+  return writeGame({ ...g, phase: "goal", score, goals, win, resumeAt: t + CONFIG.goalMs, last: { t: team, id: lt, n: lt ? nameOf(lt) : "", own: own ? 1 : 0 } });
+}
+function hostTick(dt, now) {
+  if (!host.wasHost) adopt();
+  const t = Date.now();
+  let g = game();
+  if (!g) { g = writeGame(newGame(1)); syncBots(g); kickoffReset(g); }
+  const teams = arrangeTeams(g.teams, humans());
+  if (JSON.stringify(teams) !== JSON.stringify(g.teams)) g = writeGame({ ...g, teams });
+  syncBots(g);
+  if (g.phase === "goal" && t >= g.resumeAt) {
+    if (g.win >= 0) g = writeGame({ ...g, phase: "over", overAt: t + CONFIG.resultsMs });
+    else if (!g.golden && t >= g.endsAt) g = fullTime(g, t);
+    else { g = writeGame({ ...g, phase: "play", ko: g.ko + 1, kickAt: t + CONFIG.kickoffMs }); kickoffReset(g); }
+  }
+  if (g.phase === "play" && !g.golden && t >= g.endsAt && t >= g.kickAt) g = fullTime(g, t);
+  if (g.phase === "over") {
+    const seated = g.teams.flat().filter((id) => !isBot(id));
+    const ready = seated.length && seated.every((id) => (id === net.sessionId ? myReady : (S.entities.players[id] || {}).rdy) === g.id);
+    if (t > g.overAt || ready) { g = writeGame(newGame(g.id + 1)); syncBots(g); kickoffReset(g); }
+  }
+  for (const b of host.bots.values()) botTick(b, g, dt, now, t);
+  const live = g.phase === "play" && t >= g.kickAt;
+  if (live || g.phase === "goal") { // in a goal the ball just rolls on into the net
+    ball.z = 0;
+    const discs = live ? [...host.bots.values()] : [];
+    if (live && teamOf(g, net.sessionId) >= 0) discs.push(me);
+    const res = host.pending ? { hit: null } : stepBall(ball, dt, discs);
+    if (res.hit) { ball.h++; ball.lt = res.hit.id; }
+    if (res.wall) bounceFx(); if (res.post) postFx();
+    if (live && res.goal >= 0 && !host.pending) { // in a goal: count it now, or give someone else's screen a moment to send a save
+      const remote = g.teams.flat().some((id) => !isBot(id) && id !== net.sessionId);
+      host.pending = { side: res.goal, at: now + (remote ? CONFIG.goalGrace : 0) };
+    }
+    if (live && host.pending && now >= host.pending.at) { g = scoreGoal(g, host.pending.side, t); host.pending = null; }
+  } else ball.z = 1;
+  if (now - host.lastBall > CONFIG.sendMs) writeBall(true);
+}
+/** A "hit" from a player on someone else's screen: adopt its touch if it happened near where the host has the ball. */
+function applyHit(msg, from) {
+  const g = game();
+  if (!g || g.phase !== "play" || msg.g !== g.id || msg.ko !== g.ko || Date.now() < g.kickAt || teamOf(g, from) < 0) return;
+  const x = +msg.x, y = +msg.y, vx = +msg.vx, vy = +msg.vy;
+  if (!isFinite(x + y + vx + vy) || Math.hypot(x - ball.x, y - ball.y) > 260) return;
+  const k = Math.min(1, CONFIG.maxBall / (Math.hypot(vx, vy) || 1));
+  Object.assign(ball, { x, y, vx: vx * k, vy: vy * k, z: 0, lt: from }); ball.h++;
+  if (host.pending && Math.abs(x) < HL + CONFIG.ballR) host.pending = null; // saved on the line
+  if (msg.kick) kickFx(x, y);
+  writeBall();
+}
+
+// ── BOTS ────────────────────────────────────────────────────────────────────────────
+/** Where a disc is on this screen: mine, a bot (the host's live one, or eased from state), or another person. */
+function discOf(id) { return id === net.sessionId ? me : (host.wasHost && host.bots.get(id)) || views.get(id) || null; }
+function botTick(b, g, dt, now, t) {
+  const team = teamOf(g, b.id), list = g.teams[team], slot = list.indexOf(b.id), home = spotOf(team, slot, list.length);
+  b.k = now < b.kickShow ? 1 : 0;
+  if (g.phase === "play" && t < g.kickAt) { Object.assign(b, home, { vx: 0, vy: 0 }); return; } // waiting for kickoff
+  let [tx, ty, kick] = g.phase === "play" ? botPlan(b, team, slot, list, now) : [home.x, home.y, false];
+  const dx = tx - b.x, dy = ty - b.y, d = Math.hypot(dx, dy), m = Math.min(1, d / 30);
+  runDisc(b, d ? (dx / d) * m : 0, d ? (dy / d) * m : 0, dt, CONFIG.botSpeed * (g.phase === "play" ? 1 : 0.45));
+  for (const id of g.teams.flat()) { const o = id !== b.id && discOf(id); if (o) pushOut(b, o, CONFIG.playerR * 2, 0.5); }
+  keepOnPitch(b);
+  const bd = Math.hypot(ball.x - b.x, ball.y - b.y) || 1, aimed = ((ball.x - b.x) * b.ux + (ball.y - b.y) * b.uy) / bd > 0.95;
+  if (kick && aimed && g.phase === "play" && now > b.kickCd && kickBall(ball, b)) {
+    b.kickCd = now + 450; b.kickShow = now + 170; ball.h++; ball.lt = b.id; kickFx(ball.x, ball.y); writeBall();
+  }
+}
+/** One bot's plan: [target x, target y, kick?]. The team's nearest player chases; the keeper guards; the rest hold shape. */
+function botPlan(b, team, slot, list, now) {
+  const dir = team === 0 ? 1 : -1, ownX = -dir * HL, keeper = slot === 0 && list.length >= 3;
+  if (now > b.thinkAt) {
+    b.thinkAt = now + CONFIG.botThink * (0.7 + Math.random() * 0.6);
+    b.ex = (Math.random() - 0.5) * CONFIG.botError; b.ey = (Math.random() - 0.5) * CONFIG.botError;
+    if (Math.random() < 0.25) b.aimY = (Math.random() - 0.5) * 1.5 * GW;
+    b.dribble = Math.random() >= CONFIG.botLongShot; // most of the time a bot far out dribbles; sometimes it boots it upfield
+  }
+  const far = (id) => { const d = discOf(id); return d ? Math.hypot(d.x - ball.x, d.y - ball.y) : 1e9; };
+  if (keeper) {
+    const danger = Math.abs(ball.x - ownX) < 230 && Math.abs(ball.y) < 220 && far(b.id) < 170;
+    if (danger) return attack(b, dir, true); // rush out and clear it
+    return [ownX + dir * 44, clamp(ball.y * CONFIG.keeperFollow + b.ey * 0.3, -GW + 4, GW - 4), false];
+  }
+  const field = list.filter((id, i) => !(i === 0 && list.length >= 3));
+  const chaser = field.reduce((best, id) => (far(id) < far(best) ? id : best), field[0]);
+  if (chaser === b.id) return attack(b, dir, false);
+  const home = spotOf(team, slot, list.length); // a helper: my spot, slid toward the ball with the rest of the team, leaning upfield for a pass
+  return [clamp(home.x + ball.x * 0.4 + dir * 90 + b.ex, -HL + 50, HL - 50), clamp(home.y * 0.8 + ball.y * 0.35 + b.ey, -HW + 30, HW - 30), false];
+}
+/** Get behind the ball (relative to where it should go) and run through it; kick when close to goal, or to clear. */
+function attack(b, dir, clear) {
+  const R = CONFIG.playerR + CONFIG.ballR, bx = ball.x + ball.vx * 0.12, by = ball.y + ball.vy * 0.12;
+  const gx = dir * (HL + 30), gy = clear ? (ball.y >= 0 ? 1 : -1) * HW : b.aimY;
+  let ux = gx - bx, uy = gy - by; const ul = Math.hypot(ux, uy) || 1; ux /= ul; uy /= ul;
+  const rx = b.x - bx, ry = b.y - by, along = rx * ux + ry * uy, side = -rx * uy + ry * ux;
+  if (along < -R * 0.4 && Math.abs(side) < R * 0.75) { // lined up behind it: run through
+    b.ux = ux; b.uy = uy; // botTick only kicks if the real ball is straight ahead along this
+    const shoot = clear || Math.abs(dir * HL - ball.x) < CONFIG.botShoot || !b.dribble;
+    return [bx + ux * 40 + b.ex * 0.15, by + uy * 40 + b.ey * 0.15, shoot];
+  }
+  const s = side >= 0 ? 1 : -1, round = along > -R * 0.4 ? R * 1.25 : 0; // round the side it's on, not through it
+  return [bx - ux * (R + 12) - uy * s * round, by - uy * (R + 12) + ux * s * round, false];
+}
+
+// ── ME ──────────────────────────────────────────────────────────────────────────────
+let myName = "";
+try { myName = localStorage.getItem("mpa-name") || ""; } catch {}
+myName = myName || ["Swift", "Lucky", "Silky", "Turbo", "Golden", "Sneaky"][Math.floor(Math.random() * 6)] + " " + ["Boots", "Striker", "Winger", "Keeper", "Nutmeg", "Volley"][Math.floor(Math.random() * 6)];
+let myColor = COLORS[0], myReady = 0; // the color is picked on join: the first one nobody in the room has
+const me = { id: "", x: 0, y: 0, vx: 0, vy: 0, k: 0, armed: false, placed: "", lastSend: 0, lastJson: "", lastHit: 0 };
+const pred = { lastS: -1, mineAt: 0, offX: 0, offY: 0 }; // a non-host's ball prediction
+const kick = { held: false };
+function myTick(dt, g, now) {
+  const team = teamOf(g, net.sessionId), t = Date.now(), live = g.phase === "play" && t >= g.kickAt;
+  const key = team >= 0 ? `${g.id}:${g.ko}:${team}` : "";
+  if (key !== me.placed) { me.placed = key; if (team >= 0) Object.assign(me, spotOf(team, g.teams[team].indexOf(net.sessionId), g.teams[team].length), { vx: 0, vy: 0 }); }
+  if (team >= 0) {
+    const frozen = g.phase === "play" && t < g.kickAt;
+    me.k = kick.held && !frozen ? 1 : 0;
+    if (frozen) { me.vx = me.vy = 0; } else { const [ix, iy] = myInput(); runDisc(me, ix, iy, dt, 1); }
+    for (const id of g.teams.flat()) { const o = id !== net.sessionId && discOf(id); if (o) pushOut(me, o, CONFIG.playerR * 2, 0.5); }
+    keepOnPitch(me);
+    const json = JSON.stringify({ x: Math.round(me.x), y: Math.round(me.y), vx: Math.round(me.vx), vy: Math.round(me.vy), k: me.k });
+    if (now - me.lastSend > CONFIG.sendMs && json !== me.lastJson) { me.lastSend = now; me.lastJson = json; net.me.set("p", json); }
+  }
+  const kicked = live && team >= 0 && me.k && me.armed && kickBall(ball, me);
+  if (kicked) { me.armed = false; kickFx(ball.x, ball.y); }
+  if (isHost()) { if (kicked) { ball.h++; ball.lt = net.sessionId; writeBall(); } return; }
+  // Not the host: our ball runs on its own between writes. A write replaces it only when something new happened
+  // there (more touches than we know of, a kickoff), or when we drifted far off. A write is always a little old,
+  // so one with the same touch count would drag the ball back in time (and through our own disc).
+  const s = cached("ball", S.shared.ball, null);
+  if (s && s.s !== pred.lastS) {
+    pred.lastS = s.s;
+    const off = Math.hypot(ball.x - s.x, ball.y - s.y), drift = 70 + Math.hypot(s.vx, s.vy) * 0.3;
+    if (!live || s.h > ball.h || s.z !== ball.z || (s.h === ball.h && off > drift) || (s.h < ball.h && now - pred.mineAt > 500)) {
+      if (off < 300) { pred.offX += ball.x - s.x; pred.offY += ball.y - s.y; } // draw the jump smoothly
+      Object.assign(ball, { x: s.x, y: s.y, vx: s.vx, vy: s.vy, h: s.h, z: s.z, lt: s.lt });
+    }
+  }
+  if (ball.z || (!live && g.phase !== "goal")) return;
+  const others = g.teams.flat().filter((id) => id !== net.sessionId).map(discOf).filter(Boolean);
+  const res = stepBall(ball, dt, live ? (team >= 0 ? [me, ...others] : others) : []);
+  if (res.wall) bounceFx(); if (res.post) postFx();
+  if (live && team >= 0 && (kicked || (res.hit === me && now - me.lastHit > CONFIG.sendMs))) { // my touch on my screen: that's the touch
+    me.lastHit = now; ball.h++; pred.mineAt = now; ball.lt = net.sessionId;
+    const r = Math.round;
+    net.send("hit", { x: r(ball.x), y: r(ball.y), vx: r(ball.vx), vy: r(ball.vy), g: g.id, ko: g.ko, kick: kicked ? 1 : 0 });
+  }
+}
+
+// ── DRAW ────────────────────────────────────────────────────────────────────────────
+const cv = document.getElementById("game"), ctx = cv.getContext("2d");
+let W = 0, H = 0, DPR = 1, scale = 1, wide = true, M = [1, 0, 0, 1], CY = 0, shake = 0;
+const cam = { x: 0, y: 0, z: 1 }; // what the view centers on, in pitch units, and its zoom (only the preview moves it)
+function fit() {
+  DPR = Math.min(2, devicePixelRatio || 1); W = innerWidth; H = innerHeight; cv.width = W * DPR; cv.height = H * DPR; wide = W >= H;
+  const long = CONFIG.fieldL + 2 * (GD + 34), short = CONFIG.fieldW + 2 * (CONFIG.runOff + 20);
+  scale = wide ? Math.min((W - 16) / long, (H - 84) / short) : Math.min((W - 12) / short, (H - 84) / long);
+  CY = H / 2 + 14;
+}
+addEventListener("resize", fit); addEventListener("orientationchange", fit); fit();
+/** The view from your side: you attack to the right (wide screens) or up (tall ones). M maps pitch to screen. */
+function setView(team) { const f = team === 1 ? -1 : 1; M = wide ? [f, 0, 0, f] : [0, f, -f, 0]; }
+const toScreen = (x, y) => { x -= cam.x; y -= cam.y; const k = scale * cam.z; return [W / 2 + (M[0] * x + M[1] * y) * k, CY + (M[2] * x + M[3] * y) * k]; };
+/** The preview zooms in and follows the ball, so the action reads in a small card. */
+function moveCam(dt) {
+  if (!ATTRACT) return;
+  cam.z = 1.45;
+  const k = scale * cam.z, ex = Math.max(0, HL + GD + 30 - W / 2 / k), ey = Math.max(0, HW + CONFIG.runOff + 16 - (H / 2 - 14) / k), a = 1 - Math.exp(-dt * 2.5);
+  cam.x += (clamp(ball.x, -ex, ex) - cam.x) * a; cam.y += (clamp(ball.y, -ey, ey) - cam.y) * a;
+}
+const views = new Map(); // id -> another person's or (not host) a bot's disc, eased toward its last write
+/** Ease every other disc toward its latest write, guessing ahead with its speed. */
+function syncViews(dt) {
+  const now = performance.now(), k = 1 - Math.exp(-dt * 16), seen = new Set(), src = [];
+  for (const [id, p] of Object.entries(S.entities.players || {})) if (id !== net.sessionId && p.p) src.push([id, p.p, cached("p:" + id, p.p, null)]);
+  if (!isHost()) { const s = cached("ball", S.shared.ball, null); for (const q of (s && s.b) || []) src.push([q[0], s.s, { x: q[1], y: q[2], vx: q[3], vy: q[4], k: q[5] }]); }
+  for (const [id, raw, f] of src) {
+    if (!f || typeof f.x !== "number") continue;
+    seen.add(id);
+    let v = views.get(id);
+    if (!v) { v = { id, x: f.x, y: f.y, vx: 0, vy: 0, k: 0, tx: f.x, ty: f.y, raw: null, at: now }; views.set(id, v); }
+    if (raw !== v.raw) {
+      Object.assign(v, { tx: f.x, ty: f.y, vx: +f.vx || 0, vy: +f.vy || 0, k: f.k ? 1 : 0, raw, at: now });
+      if (Math.hypot(v.tx - v.x, v.ty - v.y) > 220) { v.x = v.tx; v.y = v.ty; } // a kickoff: jump there
+    }
+    const ahead = Math.min(0.15, (now - v.at) / 1000);
+    v.x += (v.tx + v.vx * ahead - v.x) * k; v.y += (v.ty + v.vy * ahead - v.y) * k;
+  }
+  for (const id of views.keys()) if (!seen.has(id)) views.delete(id);
+}
+/** Every disc to draw: { id, team, x, y, k, color, name, mine, bot }. */
+function drawList(g) {
+  const out = [];
+  g.teams.forEach((list, team) => list.forEach((id) => {
+    const d = discOf(id); if (!d) return;
+    const p = S.entities.players[id] || {};
+    out.push({ id, team, x: d.x, y: d.y, k: d.k, bot: isBot(id), mine: id === net.sessionId, color: id === net.sessionId ? myColor : isBot(id) ? null : p.c || "#ddd", name: nameOf(id) });
+  }));
+  return out;
+}
+const parts = [], trail = [], nets = [0, 0];
+let roll = 0, lastFx = 0;
+function sparks(x, y, color, n, speed, life = 0.5) { for (let i = 0; i < n; i++) { const a = Math.random() * Math.PI * 2, s = speed * (0.3 + Math.random()); parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: life * (0.6 + Math.random() * 0.8), color, size: 3 + Math.random() * 5 }); } }
+function kickFx(x, y) { const now = performance.now(); if (now - lastFx < 60) return; lastFx = now; sparks(x, y, "#ffffffcc", 10, 260, 0.35); sfx("kick"); }
+function bounceFx() { sfx("wall", Math.min(1, Math.hypot(ball.vx, ball.vy) / CONFIG.maxBall)); }
+function postFx() { sfx("post"); shake = Math.max(shake, 5); }
+
+function draw(g, dt, now) {
+  const team = teamOf(g, net.sessionId); setView(team < 0 ? 0 : team);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = "#0b2617"; ctx.fillRect(0, 0, W, H);
+  shake *= Math.exp(-dt * 8);
+  moveCam(dt);
+  const k = DPR * scale * cam.z, sx = (Math.random() - 0.5) * shake, sy = (Math.random() - 0.5) * shake;
+  const pitchSpace = () => ctx.setTransform(k * M[0], k * M[2], k * M[1], k * M[3], DPR * (W / 2 + sx) - k * (M[0] * cam.x + M[1] * cam.y), DPR * (CY + sy) - k * (M[2] * cam.x + M[3] * cam.y));
+  pitchSpace(); // from here on: pitch units
+  ctx.fillStyle = "#1b5c33"; rounded(-HL - GD - 30, -HW - CONFIG.runOff - 16, 2 * (HL + GD + 30), 2 * (HW + CONFIG.runOff + 16), 36); ctx.fill();
+  const stripes = 12, sw = (2 * HL) / stripes;
+  for (let i = 0; i < stripes; i++) { ctx.fillStyle = i % 2 ? "#2e8a4b" : "#34964f"; ctx.fillRect(-HL + i * sw, -HW, sw + 0.5, 2 * HW); }
+  ctx.strokeStyle = "#ffffffd8"; ctx.lineWidth = 4; ctx.lineJoin = "round";
+  ctx.strokeRect(-HL, -HW, 2 * HL, 2 * HW);
+  ctx.beginPath(); ctx.moveTo(0, -HW); ctx.lineTo(0, HW); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 0, 92, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = "#ffffffd8"; ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI * 2); ctx.fill();
+  for (const f of [-1, 1]) {
+    ctx.strokeRect(f > 0 ? HL - 170 : -HL, -195, 170, 390); ctx.strokeRect(f > 0 ? HL - 64 : -HL, -GW - 34, 64, 2 * GW + 68);
+    ctx.beginPath(); ctx.arc(f * (HL - 120), 0, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(f * (HL - 120), 0, 92, f > 0 ? Math.PI * 0.72 : -Math.PI * 0.28, f > 0 ? Math.PI * 1.28 : Math.PI * 0.28); ctx.stroke();
+  }
+  for (const side of [0, 1]) { // the nets, posts in the color of the team defending them
+    const f = side === 1 ? 1 : -1, back = HL + GD + nets[side] * Math.sin(now / 40) * 6;
+    nets[side] *= Math.exp(-dt * 3);
+    ctx.fillStyle = "#ffffff1c"; ctx.fillRect(Math.min(f * HL, f * back), -GW, Math.abs(back - HL), 2 * GW);
+    ctx.strokeStyle = "#ffffff33"; ctx.lineWidth = 1.5; ctx.beginPath();
+    for (let y = -GW + 12; y < GW; y += 12) { ctx.moveTo(f * HL, y); ctx.lineTo(f * back, y); }
+    for (let x = 12; x < back - HL; x += 12) { ctx.moveTo(f * (HL + x), -GW); ctx.lineTo(f * (HL + x), GW); }
+    ctx.stroke();
+    ctx.strokeStyle = "#f4f7f8"; ctx.lineWidth = 5; ctx.beginPath(); ctx.moveTo(f * HL, -GW); ctx.lineTo(f * back, -GW); ctx.lineTo(f * back, GW); ctx.lineTo(f * HL, GW); ctx.stroke();
+    for (const y of [-GW, GW]) { ctx.fillStyle = TEAM_COLORS[side]; ctx.beginPath(); ctx.arc(f * HL, y, CONFIG.postR + 2, 0, Math.PI * 2); ctx.fill(); ctx.strokeStyle = "#fff"; ctx.lineWidth = 2.5; ctx.stroke(); }
+  }
+  // the ball: shadow, trail, body with patches that roll
+  const bx = ball.x + pred.offX, by = ball.y + pred.offY, r = CONFIG.ballR, speed = Math.hypot(ball.vx, ball.vy);
+  pred.offX *= Math.exp(-dt * 12); pred.offY *= Math.exp(-dt * 12);
+  roll += (speed * dt) / r;
+  trail.push({ x: bx, y: by }); if (trail.length > 10) trail.shift();
+  if (speed > 420) trail.forEach((p, i) => { ctx.fillStyle = `rgba(255,255,255,${(i / trail.length) * 0.22})`; ctx.beginPath(); ctx.arc(p.x, p.y, r * (0.4 + i / 20), 0, Math.PI * 2); ctx.fill(); });
+  const list = drawList(g);
+  for (const d of list) { ctx.fillStyle = "#00000038"; ctx.beginPath(); ctx.arc(d.x + 4, d.y + 5, CONFIG.playerR, 0, Math.PI * 2); ctx.fill(); }
+  ctx.fillStyle = "#00000040"; ctx.beginPath(); ctx.arc(bx + 3, by + 4, r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#fbfbf6"; ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI * 2); ctx.fill();
+  ctx.save(); ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI * 2); ctx.clip(); ctx.fillStyle = "#26303a";
+  const ang = Math.atan2(ball.vy, ball.vx), wob = Math.sin(roll) * r * 0.9;
+  for (let i = -1; i <= 1; i++) { ctx.beginPath(); ctx.arc(bx + Math.cos(ang) * (wob + i * r * 1.1) - Math.sin(ang) * i * r * 0.5, by + Math.sin(ang) * (wob + i * r * 1.1) + Math.cos(ang) * i * r * 0.5, r * 0.32, 0, Math.PI * 2); ctx.fill(); }
+  ctx.restore();
+  ctx.strokeStyle = "#26303a"; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI * 2); ctx.stroke();
+  // players: team color, a ring when they hold Kick, each person's own color in the middle
+  const R = CONFIG.playerR;
+  for (const d of list) {
+    if (d.mine) { ctx.strokeStyle = `rgba(255,255,255,${0.35 + Math.sin(now / 180) * 0.2})`; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(d.x, d.y, R + 9, 0, Math.PI * 2); ctx.stroke(); }
+    ctx.fillStyle = TEAM_COLORS[d.team]; ctx.beginPath(); ctx.arc(d.x, d.y, R, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = d.k ? "#ffffff" : TEAM_DARK[d.team]; ctx.lineWidth = d.k ? 5 : 3.5; ctx.stroke();
+    ctx.fillStyle = "#ffffff30"; ctx.beginPath(); ctx.arc(d.x - R * 0.25, d.y - R * 0.3, R * 0.5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = d.color || TEAM_DARK[d.team]; ctx.beginPath(); ctx.arc(d.x, d.y, R * 0.36, 0, Math.PI * 2); ctx.fill();
+  }
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const p = parts[i]; p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.93; p.vy *= 0.93;
+    if (p.life <= 0) { parts.splice(i, 1); continue; }
+    ctx.globalAlpha = Math.min(1, p.life * 2.5); ctx.fillStyle = p.color; ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+  // names, upright on screen
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0); ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+  if (!ATTRACT) for (const d of list) {
+    const [x, y] = toScreen(d.x, d.y), label = d.mine ? "You" : d.name;
+    ctx.font = `700 ${d.mine ? 13 : 12}px system-ui, sans-serif`; ctx.lineWidth = 3; ctx.strokeStyle = "#0008";
+    ctx.strokeText(label, x + sx, y + sy - R * scale * cam.z - 5); ctx.fillStyle = d.mine ? "#ffd166" : d.bot ? "#ffffffaa" : "#fff"; ctx.fillText(label, x + sx, y + sy - R * scale * cam.z - 5);
+  }
+  if (joy) { // the thumb stick
+    ctx.fillStyle = "#ffffff1c"; ctx.strokeStyle = "#ffffff55"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(joy.ox, joy.oy, 52, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    const dx = joy.x - joy.ox, dy = joy.y - joy.oy, d = Math.hypot(dx, dy), m = Math.min(1, 52 / (d || 1));
+    ctx.fillStyle = "#ffffff66"; ctx.beginPath(); ctx.arc(joy.ox + dx * m, joy.oy + dy * m, 24, 0, Math.PI * 2); ctx.fill();
+  }
+}
+function rounded(x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+
+// Sounds, made on the fly with WebAudio (no files).
+let audio = null, noise = null;
+function unlockAudio() {
+  if (audio || ATTRACT) return;
+  try { audio = new AudioContext(); noise = audio.createBuffer(1, audio.sampleRate * 0.6, audio.sampleRate); const d = noise.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1; } catch {}
+}
+function tone(type, f0, f1, len, vol, at = 0) {
+  const t = audio.currentTime + at, o = audio.createOscillator(), gain = audio.createGain();
+  o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + len);
+  gain.gain.setValueAtTime(vol, t); gain.gain.exponentialRampToValueAtTime(0.001, t + len);
+  o.connect(gain).connect(audio.destination); o.start(t); o.stop(t + len + 0.02);
+}
+function hiss(len, vol, freq) {
+  const src = audio.createBufferSource(), f = audio.createBiquadFilter(), gain = audio.createGain(), t = audio.currentTime;
+  src.buffer = noise; f.type = "bandpass"; f.frequency.value = freq; gain.gain.setValueAtTime(vol, t); gain.gain.exponentialRampToValueAtTime(0.001, t + len);
+  src.connect(f).connect(gain).connect(audio.destination); src.start(t); src.stop(t + len);
+}
+function sfx(kind, power = 1) {
+  if (!audio) return;
+  if (kind === "kick") { tone("triangle", 180, 60, 0.12, 0.4); hiss(0.06, 0.2, 1800); }
+  if (kind === "wall") tone("sine", 160, 90, 0.08, 0.05 + power * 0.15);
+  if (kind === "post") { tone("square", 880, 860, 0.25, 0.08); tone("sine", 1320, 1300, 0.3, 0.06); }
+  if (kind === "goal") { hiss(0.6, 0.35, 900); tone("sawtooth", 330, 660, 0.4, 0.12); tone("sawtooth", 440, 880, 0.5, 0.1, 0.12); }
+  if (kind === "whistle") { tone("sine", 2300, 2250, 0.18, 0.12); tone("sine", 2300, 2200, 0.35, 0.12, 0.24); }
+}
+
+// ── HUD & RESULTS ───────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+let board = null, boardFor = -1, seen = { score: "", id: -1, golden: 0, ko: -1, phase: "" }, msgUntil = 0;
+const startedAt = performance.now();
+function nameOf(id) {
+  if (!id) return "Someone";
+  if (id === net.sessionId) return myName;
+  if (isBot(id)) return BOT_NAMES[+id.slice(1)] || "Bot";
+  return String((S.entities.players[id] || {}).n || "Player");
+}
+function say(html, ms) { $("msg").innerHTML = html; msgUntil = performance.now() + ms; }
+function hud(g, now) {
+  const team = teamOf(g, net.sessionId), t = Date.now(), score = g.score.join("-");
+  if (seen.id === g.id && score !== seen.score && g.last) { // a goal: shown from the state, so everyone sees it
+    const L = g.last, side = 1 - L.t, gx = side === 1 ? HL + 20 : -HL - 20;
+    sparks(gx, 0, TEAM_COLORS[L.t], 46, 700, 0.9); sparks(gx, 0, "#ffffff", 20, 500, 0.7); shake = 16; nets[side] = 1;
+    const who = !L.id ? `for ${TEAM_NAMES[L.t]}` : (L.id === net.sessionId ? "You" : esc(L.n)) + (L.own ? " scored an own goal!" : ` for ${TEAM_NAMES[L.t]}`);
+    say(`<span style="color:${TEAM_COLORS[L.t]}">GOAL!</span><small>${who}</small>`, CONFIG.goalMs - 300); sfx("goal");
+  }
+  if (g.golden && !seen.golden && seen.id === g.id) { say(`<span style="color:#ffd166">GOLDEN GOAL</span><small>Next goal wins</small>`, 2500); sfx("whistle"); }
+  if (g.ko !== seen.ko && g.phase === "play") sfx("whistle");
+  if (g.phase === "over" && seen.phase !== "over") { say(g.win >= 0 ? `<span style="color:${TEAM_COLORS[g.win]}">FULL TIME</span>` : "FULL TIME", 1500); sfx("whistle"); }
+  if (seen.id !== g.id) msgUntil = 0;
+  Object.assign(seen, { score, id: g.id, golden: g.golden, ko: g.ko, phase: g.phase });
+  $("msg").classList.toggle("on", now < msgUntil);
+  $("s0").textContent = g.score[0]; $("s1").textContent = g.score[1];
+  $("s0").classList.toggle("me", team === 0); $("s1").classList.toggle("me", team === 1);
+  const left = Math.max(0, Math.ceil(Math.min(CONFIG.matchMs, g.endsAt - t) / 1000)); // before the first kickoff it shows the full time
+  $("clock").textContent = g.phase === "over" ? "FT" : g.golden ? "GOLDEN" : `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+  $("clock").classList.toggle("gold", !!g.golden);
+  if (ATTRACT) { $("clock").hidden = true; $("hint").textContent = $("net").textContent = ""; return; }
+  $("hint").textContent = team < 0 ? "Both teams are full. You're in the next match." : touchUI ? `You're ${TEAM_NAMES[team]}. Drag to run, hold KICK by the ball. Score on the ${wide ? "right" : "top"}.` : `You're ${TEAM_NAMES[team]}. WASD or arrows to run, hold Space to kick. Score on the ${wide ? "right" : "top"}.`;
+  $("hint").style.opacity = now - startedAt < 8000 || team < 0 ? 1 : 0;
+  const n = livePlayers().length;
+  $("net").textContent = net.offline ? "Offline: playing with bots" : `Online · ${n} player${n === 1 ? "" : "s"}${isHost() ? " · you run the match" : ""}`;
+  const card = g.phase === "over" && t > g.overAt - CONFIG.resultsMs + 1500;
+  $("over").hidden = !card;
+  if (card) {
+    const won = team >= 0 && g.win === team;
+    $("winner").textContent = won ? "You win!" : g.win >= 0 ? `${TEAM_NAMES[g.win]} wins!` : "A draw";
+    $("winner").style.color = g.win >= 0 ? TEAM_COLORS[g.win] : "#fff";
+    $("final").innerHTML = `<span style="color:${TEAM_COLORS[0]}">${TEAM_NAMES[0]}</span> ${g.score[0]} – ${g.score[1]} <span style="color:${TEAM_COLORS[1]}">${TEAM_NAMES[1]}</span>`;
+    const scorers = Object.entries(g.goals || {}).sort((a, b) => b[1][0] - a[1][0]);
+    $("scorers").innerHTML = scorers.length ? scorers.map(([id, [n, name]]) => `<li class="${id === net.sessionId ? "me" : ""}">${esc(id === net.sessionId ? "You" : name)}<span>${n}</span></li>`).join("") : "<li>Nobody scored.</li>";
+    $("again").hidden = team < 0;
+    $("again").textContent = myReady === g.id ? "Waiting for the others…" : "Play again";
+    $("next").textContent = `Next match in ${Math.max(0, Math.ceil((g.overAt - t) / 1000))}s`;
+    if (boardFor !== g.id) { boardFor = g.id; showBoard(((g.goals || {})[net.sessionId] || [0])[0]); }
+  }
+}
+function showBoard(myGoals) {
+  const list = $("board");
+  if (!board) { list.innerHTML = "<li>Leaderboards need a connection.</li>"; return; }
+  list.innerHTML = "<li>Loading…</li>";
+  (myGoals > 0 ? board.submit(myGoals, "inc").catch(() => null) : Promise.resolve()).then(() => board.top(10)).then(({ entries }) => {
+    list.innerHTML = entries.length ? entries.map((e) => `<li>${esc(e.username || "Player")}<span>${e.score}</span></li>`).join("") : "<li>No goals yet. Be the first.</li>";
+  }).catch(() => { list.innerHTML = "<li>Couldn't load the leaderboard.</li>"; });
+}
+$("again").onclick = () => { const g = game(); if (g && g.phase === "over") { myReady = g.id; net.me.set("rdy", g.id); } };
+
+/** Two players picked the same color at once (the joiner's first state can be empty): the later sessionId picks again. */
+function fixColor() {
+  const others = Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId);
+  if (!others.some(([id, p]) => p.c === myColor && id < net.sessionId)) return;
+  const taken = new Set(others.map(([, p]) => p.c));
+  myColor = COLORS.find((c) => !taken.has(c)) || myColor; net.me.set("c", myColor);
+}
+
+// ── INPUT ───────────────────────────────────────────────────────────────────────────
+const touchUI = matchMedia("(pointer: coarse)").matches && !ATTRACT;
+const keys = new Set(), KICK_KEYS = [" ", "x", "k", "enter"];
+let joy = null, kickFinger = null; // the thumb stick: { id, ox, oy, x, y } in screen px
+/** Where I want to run, in pitch directions: the keys or the thumb stick, turned from screen to pitch by the view. */
+function myInput() {
+  let u = (keys.has("arrowright") || keys.has("d") ? 1 : 0) - (keys.has("arrowleft") || keys.has("a") ? 1 : 0);
+  let v = (keys.has("arrowdown") || keys.has("s") ? 1 : 0) - (keys.has("arrowup") || keys.has("w") ? 1 : 0);
+  if (joy) { const dx = joy.x - joy.ox, dy = joy.y - joy.oy, d = Math.hypot(dx, dy); u = d > 6 ? (dx / d) * Math.min(1, d / 46) : 0; v = d > 6 ? (dy / d) * Math.min(1, d / 46) : 0; }
+  const l = Math.hypot(u, v); if (l > 1) { u /= l; v /= l; }
+  return [M[0] * u + M[2] * v, M[1] * u + M[3] * v];
+}
+function kickDown() { if (!kick.held) me.armed = true; kick.held = true; $("kick").classList.add("on"); }
+function kickUp() { kick.held = false; me.armed = false; $("kick").classList.remove("on"); }
+addEventListener("keydown", (e) => {
+  const k = e.key.toLowerCase(); unlockAudio();
+  if (["arrowleft", "arrowright", "arrowup", "arrowdown", " "].includes(k)) e.preventDefault();
+  keys.add(k); if (KICK_KEYS.includes(k) && !e.repeat) kickDown();
+});
+addEventListener("keyup", (e) => { const k = e.key.toLowerCase(); keys.delete(k); if (KICK_KEYS.includes(k)) kickUp(); });
+addEventListener("blur", () => { keys.clear(); kickUp(); });
+cv.addEventListener("pointerdown", (e) => {
+  e.preventDefault(); unlockAudio();
+  if (e.pointerType === "mouse") { kickDown(); return; } // a mouse click kicks too
+  if (!joy) { joy = { id: e.pointerId, ox: e.clientX, oy: e.clientY, x: e.clientX, y: e.clientY }; cv.setPointerCapture(e.pointerId); }
+  else { kickFinger = e.pointerId; kickDown(); } // a second finger anywhere kicks
+});
+cv.addEventListener("pointermove", (e) => { if (joy && e.pointerId === joy.id) { joy.x = e.clientX; joy.y = e.clientY; } });
+for (const ev of ["pointerup", "pointercancel"]) cv.addEventListener(ev, (e) => {
+  if (e.pointerType === "mouse") kickUp();
+  if (joy && e.pointerId === joy.id) joy = null;
+  if (e.pointerId === kickFinger) { kickFinger = null; kickUp(); }
+});
+const kickBtn = $("kick");
+kickBtn.hidden = !touchUI;
+kickBtn.addEventListener("pointerdown", (e) => { e.preventDefault(); unlockAudio(); kickBtn.setPointerCapture(e.pointerId); kickDown(); });
+for (const ev of ["pointerup", "pointercancel"]) kickBtn.addEventListener(ev, kickUp);
+document.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+
+// ── MAIN LOOP ───────────────────────────────────────────────────────────────────────
+let last = performance.now(), lastHb = 0, lastHud = 0;
+function frame(now) {
+  const dt = Math.max(0, Math.min(0.05, (now - last) / 1000)); last = now; // the first frame can be stamped before `last`
+  if (now - lastHb > 1000) { lastHb = now; net.me.set("hb", Date.now()); fixColor(); }
+  syncViews(dt);
+  if (isHost()) hostTick(dt, now); else host.wasHost = false;
+  const g = game();
+  if (g) {
+    myTick(dt, g, now);
+    draw(g, dt, now);
+    if (now - lastHud > 100) { lastHud = now; hud(g, now); }
+  }
+  requestAnimationFrame(frame);
+}
+
+(async function start() {
+  net = await connect();
+  me.id = net.sessionId;
+  net.onState((st) => { S = st; });
+  net.on("hit", (msg, from) => { if (isHost() && msg) applyHit(msg, from); else if (msg && msg.kick) kickFx(+msg.x, +msg.y); });
+  net.onDisconnect(() => { $("net").textContent = "Reconnecting…"; });
+  if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
+  const taken = new Set(Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c));
+  myColor = COLORS.find((c) => !taken.has(c)) || COLORS[Math.floor(Math.random() * COLORS.length)];
+  net.me.set({ n: myName, c: myColor, hb: Date.now() });
+  if (ATTRACT) Object.assign(CONFIG, { goalMs: 1300, kickoffMs: 350, kickPower: 900, maxBall: 1300, botError: 60, botThink: 90, botShoot: 650, botLongShot: 0, botSpeed: 0.95, keeperFollow: 0, goalsToWin: 99, matchMs: 1e9 });
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

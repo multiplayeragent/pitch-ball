@@ -1,0 +1,21 @@
+{
+  "name": "Pitch Ball",
+  "genre": "sports",
+  "dim": "2D",
+  "mode": "Versus",
+  "players": "2–8",
+  "hook": "Round players, one ball, hold Kick and score.",
+  "how": "Run around the pitch, bump the ball to dribble and hold Kick to shoot it into the far goal. First team to 5, or the leader after 3 minutes; a tie goes to golden goal.",
+  "controls": "WASD or arrows to run, Space or click to kick · touch: drag to run, hold Kick",
+  "uses": [
+    ["Host-run physics", "One player's browser moves the ball and runs the clock, so everyone sees the same bounce; if it leaves, the next player takes over."],
+    ["Bots", "Bots fill every empty spot, so even alone you play 3 against 3."],
+    ["Leaderboard", "Most goals, for every player."],
+    ["Live sync", "Every player and the ball move for everyone at once."]
+  ],
+  "ideas": [
+    "Make the ball bigger and bouncier",
+    "Add a speed boost button with a cooldown",
+    "Make it ice hockey on a frozen rink"
+  ]
+}
