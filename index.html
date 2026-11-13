@@ -81,6 +81,8 @@
  *     your disc bumps or kicks the ball on your screen, it moves at once and you send "hit"
  *     {x, y, vx, vy, g, ko, kick}; the host checks it is plausible and adopts it. A ball that
  *     crosses a goal line on the host's screen waits `goalGrace` ms for a save before it counts.
+ *     The host sends "fx" {x, y} for its own kicks and the bots', so every screen shows them.
+ *   - A goal that only brushed a defender on the way in (a bump, not a kick) counts for the attacker.
  *   - Someone who joins takes a bot's spot on the team with fewer people, mid-match; someone who
  *     leaves is replaced by a bot. A new host adopts `game` and `ball` and carries on.
  *   - ?attract plays offline, bots against bots (the preview video is recorded from it).
@@ -266,7 +268,7 @@ function kickBall(b, d) {
 }
 
 // ── MATCH (HOST) ────────────────────────────────────────────────────────────────────
-const host = { last: null, wasHost: false, bots: new Map(), lastBall: 0, lastBody: "", pending: null };
+const host = { last: null, wasHost: false, bots: new Map(), lastBall: 0, lastBody: "", pending: null, touch: [null, null], kicked: false }; // touch: each team's last touch {id, at}; kicked: the last touch was a kick
 let ball = { x: 0, y: 0, vx: 0, vy: 0, h: 0, s: 0, z: 1, lt: "" }; // the host's real ball; everyone else's prediction of it
 const isBot = (id) => /^b\d$/.test(id);
 const teamOf = (g, id) => (g.teams[0].includes(id) ? 0 : g.teams[1].includes(id) ? 1 : -1);
@@ -313,7 +315,7 @@ function newGame(id) {
 /** Everyone back on their spot (bots here; people move themselves when they see `ko` change), ball on the spot. */
 function kickoffReset(g) {
   for (const b of host.bots.values()) { const k = teamOf(g, b.id); if (k >= 0) Object.assign(b, spotOf(k, g.teams[k].indexOf(b.id), g.teams[k].length), { vx: 0, vy: 0 }); }
-  Object.assign(ball, { x: 0, y: 0, vx: 0, vy: 0, z: 1, lt: "" }); host.pending = null; writeBall();
+  Object.assign(ball, { x: 0, y: 0, vx: 0, vy: 0, z: 1, lt: "" }); host.pending = null; host.touch = [null, null]; writeBall();
 }
 function writeBall(onlyIfMoved) {
   const r = Math.round, b = [...host.bots.values()].map((q) => [q.id, r(q.x), r(q.y), r(q.vx), r(q.vy), q.k ? 1 : 0]);
@@ -346,7 +348,9 @@ function fullTime(g, t) {
 }
 /** The ball is in `side`'s goal: a goal for the other team (or an own goal), maybe the winner. */
 function scoreGoal(g, side, t) {
-  const team = 1 - side, lt = ball.lt, own = !!lt && teamOf(g, lt) === side, score = [...g.score];
+  const team = 1 - side, by = host.touch[team];
+  let lt = ball.lt, own = !!lt && teamOf(g, lt) === side, score = [...g.score];
+  if (own && !host.kicked && by && performance.now() - by.at < 3000) { lt = by.id; own = false; } // a defender only got a touch on it: the attacker's goal
   score[team]++;
   const goals = { ...g.goals };
   if (lt && !own) goals[lt] = [((goals[lt] || [])[0] || 0) + 1, nameOf(lt)];
@@ -379,7 +383,7 @@ function hostTick(dt, now) {
     const discs = live ? [...host.bots.values()] : [];
     if (live && teamOf(g, net.sessionId) >= 0) discs.push(me);
     const res = host.pending ? { hit: null } : stepBall(ball, dt, discs);
-    if (res.hit) { ball.h++; ball.lt = res.hit.id; }
+    if (res.hit) { ball.h++; noteTouch(g, res.hit.id, false); }
     if (res.wall) bounceFx(); if (res.post) postFx();
     if (live && res.goal >= 0 && !host.pending) { // in a goal: count it now, or give someone else's screen a moment to send a save
       const remote = g.teams.flat().some((id) => !isBot(id) && id !== net.sessionId);
@@ -389,6 +393,10 @@ function hostTick(dt, now) {
   } else ball.z = 1;
   if (now - host.lastBall > CONFIG.sendMs) writeBall(true);
 }
+/** Who touched the ball last (and the last touch for each team, so a goal that only brushed a defender stays the attacker's). */
+function noteTouch(g, id, kicked) { ball.lt = id; host.kicked = kicked; const k = teamOf(g, id); if (k >= 0) host.touch[k] = { id, at: performance.now() }; }
+/** The host's own kicks and the bots': an "fx" event, so every screen shows the kick (people's own kicks ride on "hit"). */
+function tellFx(x, y) { if (!net.offline) net.send("fx", { x: Math.round(x), y: Math.round(y) }); }
 /** A "hit" from a player on someone else's screen: adopt its touch if it happened near where the host has the ball. */
 function applyHit(msg, from) {
   const g = game();
@@ -396,7 +404,7 @@ function applyHit(msg, from) {
   const x = +msg.x, y = +msg.y, vx = +msg.vx, vy = +msg.vy;
   if (!isFinite(x + y + vx + vy) || Math.hypot(x - ball.x, y - ball.y) > 260) return;
   const k = Math.min(1, CONFIG.maxBall / (Math.hypot(vx, vy) || 1));
-  Object.assign(ball, { x, y, vx: vx * k, vy: vy * k, z: 0, lt: from }); ball.h++;
+  Object.assign(ball, { x, y, vx: vx * k, vy: vy * k, z: 0 }); ball.h++; noteTouch(g, from, !!msg.kick);
   if (host.pending && Math.abs(x) < HL + CONFIG.ballR) host.pending = null; // saved on the line
   if (msg.kick) kickFx(x, y);
   writeBall();
@@ -416,7 +424,7 @@ function botTick(b, g, dt, now, t) {
   keepOnPitch(b);
   const bd = Math.hypot(ball.x - b.x, ball.y - b.y) || 1, aimed = ((ball.x - b.x) * b.ux + (ball.y - b.y) * b.uy) / bd > 0.95;
   if (kick && aimed && g.phase === "play" && now > b.kickCd && kickBall(ball, b)) {
-    b.kickCd = now + 450; b.kickShow = now + 170; ball.h++; ball.lt = b.id; kickFx(ball.x, ball.y); writeBall();
+    b.kickCd = now + 450; b.kickShow = now + 170; ball.h++; noteTouch(g, b.id, true); kickFx(ball.x, ball.y); tellFx(ball.x, ball.y); writeBall();
   }
 }
 /** One bot's plan: [target x, target y, kick?]. The team's nearest player chases; the keeper guards; the rest hold shape. */
@@ -478,7 +486,7 @@ function myTick(dt, g, now) {
   }
   const kicked = live && team >= 0 && me.k && me.armed && kickBall(ball, me);
   if (kicked) { me.armed = false; kickFx(ball.x, ball.y); }
-  if (isHost()) { if (kicked) { ball.h++; ball.lt = net.sessionId; writeBall(); } return; }
+  if (isHost()) { if (kicked) { ball.h++; noteTouch(g, net.sessionId, true); tellFx(ball.x, ball.y); writeBall(); } return; }
   // Not the host: our ball runs on its own between writes. A write replaces it only when something new happened
   // there (more touches than we know of, a kickoff), or when we drifted far off. A write is always a little old,
   // so one with the same touch count would drag the ball back in time (and through our own disc).
@@ -761,6 +769,7 @@ cv.addEventListener("pointerdown", (e) => {
   if (!joy) { joy = { id: e.pointerId, ox: e.clientX, oy: e.clientY, x: e.clientX, y: e.clientY }; cv.setPointerCapture(e.pointerId); }
   else { kickFinger = e.pointerId; kickDown(); } // a second finger anywhere kicks
 });
+cv.addEventListener("contextmenu", (e) => e.preventDefault()); // a right-click kicks too, without the menu
 cv.addEventListener("pointermove", (e) => { if (joy && e.pointerId === joy.id) { joy.x = e.clientX; joy.y = e.clientY; } });
 for (const ev of ["pointerup", "pointercancel"]) cv.addEventListener(ev, (e) => {
   if (e.pointerType === "mouse") kickUp();
@@ -796,6 +805,7 @@ function frame(now) {
   me.id = net.sessionId;
   net.onState((st) => { S = st; });
   net.on("hit", (msg, from) => { if (isHost() && msg) applyHit(msg, from); else if (msg && msg.kick) kickFx(+msg.x, +msg.y); });
+  net.on("fx", (msg) => { if (!isHost() && msg) kickFx(+msg.x, +msg.y); });
   net.onDisconnect(() => { $("net").textContent = "Reconnecting…"; });
   if (!net.offline && typeof MP !== "undefined") board = MP.auth({ key: MP_CONNECT.key, apiUrl: MP_CONNECT.apiUrl }).leaderboard(CONFIG.board);
   const taken = new Set(Object.entries(S.entities.players || {}).filter(([id]) => id !== net.sessionId).map(([, p]) => p.c));
